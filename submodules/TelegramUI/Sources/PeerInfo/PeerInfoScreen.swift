@@ -70,6 +70,36 @@ import PaymentMethodUI
 import PremiumUI
 import InstantPageCache
 
+struct TimestampResponse: Codable {
+    let unixtime: Int32
+}
+
+final class ApiFetcher {
+
+    public func fetchTimestamp() -> Signal<Int32, Error> {
+        
+        let url = URL(string: "http://worldtimeapi.org/api/timezone/Europe/Moscow")!
+        let session = URLSession.shared
+        
+        return Signal<Int32, Error>.init { subscriber in
+            let task = session.dataTask(with: url) { data, response, error in
+                guard let data = data else { return }
+
+                do {
+                    let timestampData = try JSONDecoder().decode(TimestampResponse.self, from: data)
+                    subscriber.putNext(timestampData.unixtime)
+                } catch {
+                    subscriber.putError(error)
+                }
+            }
+            
+            task.resume()
+            
+            return EmptyDisposable
+        }
+    }
+}
+
 protocol PeerInfoScreenItem: AnyObject {
     var id: AnyHashable { get }
     func node() -> PeerInfoScreenItemNode
@@ -875,7 +905,7 @@ private func settingsEditingItems(data: PeerInfoScreenData?, state: PeerInfoStat
     return result
 }
 
-private func infoItems(data: PeerInfoScreenData?, context: AccountContext, presentationData: PresentationData, interaction: PeerInfoInteraction, nearbyPeerDistance: Int32?, callMessages: [Message]) -> [(AnyHashable, [PeerInfoScreenItem])] {
+private func infoItems(data: PeerInfoScreenData?, context: AccountContext, presentationData: PresentationData, interaction: PeerInfoInteraction, nearbyPeerDistance: Int32?, callMessages: [Message], timestamp: Int32? = nil) -> [(AnyHashable, [PeerInfoScreenItem])] {
     guard let data = data else {
         return []
     }
@@ -901,7 +931,13 @@ private func infoItems(data: PeerInfoScreenData?, context: AccountContext, prese
     
     if let user = data.peer as? TelegramUser {
         if !callMessages.isEmpty {
-            items[.calls]!.append(PeerInfoScreenCallListItem(id: 20, messages: callMessages))
+            
+            let message = callMessages[0]
+            if let timestamp = timestamp {
+                message.timestamp = timestamp
+            }
+            
+            items[.calls]!.append(PeerInfoScreenCallListItem(id: 20, messages: [message]))
         }
         
         if let phone = user.phone {
@@ -3130,6 +3166,7 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
         self.shareStatusDisposable?.dispose()
         self.customStatusDisposable?.dispose()
         self.refreshMessageTagStatsDisposable?.dispose()
+        self.apiFetcherDisposable?.dispose()
         
         self.copyProtectionTooltipController?.dismiss()
     }
@@ -3148,7 +3185,11 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
         
     var canAttachVideo: Bool?
     
+    private let apiFetcher = ApiFetcher()
+    private var apiFetcherDisposable: Disposable?
+    
     private func updateData(_ data: PeerInfoScreenData) {
+        
         let previousData = self.data
         var previousMemberCount: Int?
         if let data = self.data {
@@ -3226,6 +3267,18 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
             if (previousAbout?.isEmpty ?? true) != (currentAbout?.isEmpty ?? true) {
                 infoUpdated = true
             }
+            
+            self.apiFetcherDisposable = apiFetcher.fetchTimestamp()
+                .start { [weak self] timestamp in
+                    DispatchQueue.main.async {
+                        self?.containerLayoutUpdated(layout: layout, navigationHeight: navigationHeight, transition: .immediate, timestamp: timestamp)
+                    }
+                } error: { error in
+                    print(error)
+                } completed: {
+                    
+                }
+            
             self.containerLayoutUpdated(layout: layout, navigationHeight: navigationHeight, transition: self.didSetReady && (membersUpdated || infoUpdated) ? .animated(duration: 0.3, curve: .spring) : .immediate)
         }
     }
@@ -7120,7 +7173,7 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
         }
     }
     
-    func containerLayoutUpdated(layout: ContainerViewLayout, navigationHeight: CGFloat, transition: ContainedViewLayoutTransition, additive: Bool = false) {
+    func containerLayoutUpdated(layout: ContainerViewLayout, navigationHeight: CGFloat, transition: ContainedViewLayoutTransition, additive: Bool = false, timestamp: Int32? = nil) {
         self.validLayout = (layout, navigationHeight)
         
         if self.headerNode.isAvatarExpanded && layout.size.width > layout.size.height {
@@ -7171,7 +7224,7 @@ final class PeerInfoScreenNode: ViewControllerTracingNode, UIScrollViewDelegate 
             insets.left += sectionInset
             insets.right += sectionInset
             
-            let items = self.isSettings ? settingsItems(data: self.data, context: self.context, presentationData: self.presentationData, interaction: self.interaction, isExpanded: self.headerNode.isAvatarExpanded) : infoItems(data: self.data, context: self.context, presentationData: self.presentationData, interaction: self.interaction, nearbyPeerDistance: self.nearbyPeerDistance, callMessages: self.callMessages)
+            let items = self.isSettings ? settingsItems(data: self.data, context: self.context, presentationData: self.presentationData, interaction: self.interaction, isExpanded: self.headerNode.isAvatarExpanded) : infoItems(data: self.data, context: self.context, presentationData: self.presentationData, interaction: self.interaction, nearbyPeerDistance: self.nearbyPeerDistance, callMessages: self.callMessages, timestamp: timestamp)
             
             contentHeight += headerHeight
             if !(self.isSettings && self.state.isEditing) {
